@@ -50,6 +50,10 @@
 /*set to 1 if you want MPD to use SegmentTemplate if possible instead of SegmentList*/
 #define M3U8_TO_MPD_USE_TEMPLATE	0
 
+#include <sys/time.h>
+
+char filename[40];
+
 typedef enum {
 	GF_DASH_STATE_STOPPED = 0,
 	/*period setup and playback chain creation*/
@@ -2368,6 +2372,20 @@ static Double gf_dash_get_max_available_speed(GF_DashClient *dash, GF_DASH_Group
 	return max_available_speed/2; // for testing and debug
 }
 
+static void store_stats_to_file(char* rep_id, double beginTimestamp, double endTimestamp, double avg_bitrate, double download_time, u32 buffer_size)
+{
+
+        GF_LOG(GF_LOG_ERROR, GF_LOG_DASH, ("Buffer size %d, rep: %s \n", buffer_size, rep_id));
+        FILE * log;
+        log = fopen(filename, "a");
+
+        fprintf(log, "%s;%.0f;%.0f;%.0f;%f;%d\n", rep_id, beginTimestamp, endTimestamp, avg_bitrate, download_time, buffer_size);
+
+        fclose(log);
+        
+        
+}
+
 static void dash_store_stats(GF_DashClient *dash, GF_DASH_Group *group, u32 bytes_per_sec, u32 file_size)
 {
 	const char *url;
@@ -2673,6 +2691,7 @@ static s32 dash_do_rate_adaptation_legacy_buffer(GF_DashClient *dash, GF_DASH_Gr
 		else {
 			buf_high_threshold = 2 * group->buffer_max_ms / 3;
 		}
+
 		buf_low_threshold = (group->current_downloaded_segment_duration && (group->buffer_min_ms>10)) ? group->buffer_min_ms : (u32)group->current_downloaded_segment_duration;
 		if (buf_low_threshold > group->buffer_max_ms) buf_low_threshold = 1 * group->buffer_max_ms / 3;
 
@@ -5342,6 +5361,14 @@ static DownloadGroupStatus dash_download_group_download(GF_DashClient *dash, GF_
 			gf_dash_update_buffering(group, dash);
 		}
 		dash_store_stats(dash, group, Bps, file_size);
+	        
+		struct timeval tv;
+		gettimeofday(&tv, NULL);
+		double timestamp = (double)(tv.tv_sec * 1000)+(double)(tv.tv_usec/1000);
+        	double download_time =  (double)group->total_size/(double)group->bytes_per_sec;
+		double begin_timestamp = (double)timestamp - download_time*1000;
+
+		store_stats_to_file(rep->id, begin_timestamp, timestamp, 8*group->bytes_per_sec, download_time, group->buffer_occupancy_ms);
 
 		/* download enhancement representation of this segment*/
 		if ((representation_index != group->force_max_rep_index) && rep->enhancement_rep_index_plus_one) {
@@ -5650,6 +5677,19 @@ static u32 dash_main_thread_proc(void *par)
 	Bool go_on = GF_TRUE;
 	Bool first_period_in_mpd = GF_TRUE;
 
+	struct tm *timenow;
+        time_t now = time(NULL);
+        timenow = gmtime(&now);
+
+        strftime(filename, sizeof(filename), "dash_log_%Y-%m-%d_%H-%M-%S.txt", timenow);
+
+        FILE * log_file = fopen(filename, "w");
+
+        fprintf(log_file, "RepId;Begin;End;Avg.Bitrate;DownloadTime;BufferSize\n");
+
+        fclose(log_file);
+
+
 	assert(dash);
 	if (!dash->mpd) {
 		GF_LOG(GF_LOG_WARNING, GF_LOG_DASH, ("[DASH] Incorrect state, no dash->mpd for URL=%s, already stopped ?\n", dash->base_url));
@@ -5733,10 +5773,12 @@ restart_period:
 		/*wait until next segment is needed*/
 		while (!dash->mpd_stop_request) {
 			u32 timer = gf_sys_clock() - dash->last_update_time;
+			dash->mpd->minimum_update_period = 5000;
 
 			/*refresh MPD*/
 			if (dash->force_mpd_update || (dash->mpd->minimum_update_period && (timer > dash->mpd->minimum_update_period))) {
 				u32 diff = gf_sys_clock();
+
 				if (dash->force_mpd_update || dash->mpd->minimum_update_period) {
 					GF_LOG(GF_LOG_INFO, GF_LOG_DASH, ("[DASH] At %d Time to update the playlist (%u ms elapsed since last refresh and min reload rate is %u)\n", gf_sys_clock() , timer, dash->mpd->minimum_update_period));
 				}
@@ -6463,7 +6505,8 @@ void gf_dash_close(GF_DashClient *dash)
 GF_EXPORT
 void gf_dash_set_algo(GF_DashClient *dash, GF_DASHAdaptationAlgorithm algo)
 {
-	dash->adaptation_algorithm = algo;
+	dash->adaptation_algorithm = GF_DASH_ALGO_GPAC_LEGACY_RATE;
+	//dash->adaptation_algorithm = GF_DASH_ALGO_GPAC_LEGACY_RATE;
 	switch (dash->adaptation_algorithm) {
 	case GF_DASH_ALGO_GPAC_LEGACY_BUFFER:
 		dash->rate_adaptation_algo = dash_do_rate_adaptation_legacy_buffer;
